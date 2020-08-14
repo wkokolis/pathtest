@@ -1,0 +1,75 @@
+pipeline {
+  agent any 
+
+  environment {
+    def scmVars = checkout scm
+
+    // basic variables
+    NAMESPACE			= 'wkokolis'
+    REGCREDS			= 'wkokolis-dockerhub'
+
+    // what are we making, and what is it based on?
+    IMAGE       		= 'robert'
+    TAG				= "${env.TAG_NAME ? "${env.TAG_NAME}" : "${env.GIT_COMMIT}"}"
+    BASE_NAMESPACE		= 'library'
+    BASE        		= 'python'
+    BASEVER			= '3.6-alpine'
+  }
+
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    timeout(time: 30, unit: 'MINUTES')
+    disableConcurrentBuilds()
+  }
+
+  stages {
+    stage('Pull latest base image') {
+      steps {
+        pullBaseImage(
+          namespace: "${env.BASE_NAMESPACE}",
+          image: "${env.BASE}",
+          tag: "${env.BASEVER}"
+        )
+      }
+    }
+    stage('Execute sonar scan') {
+      agent {
+        docker {
+          image "terazo/sonar-jenkins-worker:3.3.0.1492"
+          args '-v /opt/jenkins/workspace:/var/jenkins-home/workspace'
+          registryCredentialsId 'terazo-dockerhub'
+          reuseNode true
+        }
+      }
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+          withSonarQubeEnv('localsonar') {
+            sonarQubeScan(type: 'python', context_path: "robert")
+          }
+          timeout(time: 10, unit: 'MINUTES') {
+            waitForQualityGate abortPipeline: true
+          }
+        }
+      }
+    }
+    stage('Build image') {
+      steps {
+        buildPushImage(
+          namespace: "${env.NAMESPACE}",
+          image: "${env.IMAGE}",
+          tag: "${env.TAG}",
+          push: "false",
+          context_path: "robert" 
+        )
+      }
+    }
+  }
+
+  post {
+    cleanup {
+      sh "docker rmi ${env.NAMESPACE}/${env.IMAGE}:${env.TAG} || exit 0"
+
+      cleanWs()
+    }
+  }
+}
